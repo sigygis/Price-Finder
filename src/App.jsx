@@ -147,7 +147,19 @@ export default function App() {
     return true;
   });
 
-  const sorted = [...filtered].sort((a, b) => {
+  // Deduplicate: keep only the cheapest listing per skin (market_hash_name)
+  const deduped = (() => {
+    const map = new Map();
+    for (const r of filtered) {
+      const key = r.item?.market_hash_name || r.id;
+      if (!map.has(key) || r.price < map.get(key).price) {
+        map.set(key, r);
+      }
+    }
+    return [...map.values()];
+  })();
+
+  const sorted = [...deduped].sort((a, b) => {
     switch (sortBy) {
       case "spread_pct": return a._spreadPct - b._spreadPct; // lowest spread % = tightest = best opportunity
       case "spread_pct_desc": return b._spreadPct - a._spreadPct;
