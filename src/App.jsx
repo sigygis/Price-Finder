@@ -22,20 +22,37 @@ export default function App() {
   const [searchName, setSearchName] = useState("");
   const [filterText, setFilterText] = useState("");
   const [sortBy, setSortBy] = useState("spread_pct");
+  const [category, setCategory] = useState(0); // 0=all, 1=normal, 2=stattrak, 3=souvenir
+  const [minVolume, setMinVolume] = useState("5"); // minimum SCM volume for liquidity
   const abortRef = useRef(false);
 
-  // Fetch buy orders for a specific listing
+  // Fetch buy orders for a listing
   const fetchBuyOrders = useCallback(async (listingId) => {
     try {
-      const resp = await fetch(`${API}/listings/${listingId}/buy-orders?limit=1`, {
+      const resp = await fetch(`${API}/listings/${listingId}/buy-orders?limit=5`, {
         headers: { Authorization: apiKey },
       });
+      if (resp.status === 429) {
+        // Rate limited - wait and retry once
+        console.log("⏳ Rate limited, waiting 6s...");
+        await sleep(6000);
+        const retry = await fetch(`${API}/listings/${listingId}/buy-orders?limit=5`, {
+          headers: { Authorization: apiKey },
+        });
+        if (!retry.ok) return null;
+        const data = await retry.json();
+        const orders = Array.isArray(data) ? data : [];
+        if (orders.length > 0) {
+          orders.sort((a, b) => b.price - a.price);
+          return orders[0];
+        }
+        return null;
+      }
       if (!resp.ok) return null;
       const data = await resp.json();
-      // Could be array or { data: [...] }
-      const orders = Array.isArray(data) ? data : (data.data || data.buy_orders || []);
+      const orders = Array.isArray(data) ? data : [];
       if (orders.length > 0) {
-        // Highest buy order = first one (usually sorted desc)
+        orders.sort((a, b) => b.price - a.price);
         return orders[0];
       }
       return null;
@@ -57,6 +74,7 @@ export default function App() {
       p.set("limit", "50");
       p.set("sort_by", "best_deal");
       p.set("type", "buy_now");
+      if (category > 0) p.set("category", String(category));
       if (minPrice) p.set("min_price", String(Math.round(parseFloat(minPrice) * 100)));
       if (maxPrice) p.set("max_price", String(Math.round(parseFloat(maxPrice) * 100)));
       if (searchName.trim()) p.set("market_hash_name", searchName.trim());
@@ -100,11 +118,13 @@ export default function App() {
             _spreadPct: spreadPct,
             _bidQty: topOrder.qty || topOrder.quantity || 1,
           });
+        } else {
+          console.log(`❌ No buy orders for ${skinName} (listing ${listing.id})`);
         }
 
         setResults([...enriched]);
-        // Small delay to avoid rate limiting
-        if (i < items.length - 1) await sleep(120);
+        // Delay to respect rate limit (20 req per period)
+        if (i < items.length - 1) await sleep(350);
       }
 
       setProgress({ done: items.length, total: items.length, status: "Done!" });
@@ -113,14 +133,18 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [apiKey, minPrice, maxPrice, searchName, fetchBuyOrders]);
+  }, [apiKey, minPrice, maxPrice, searchName, category, fetchBuyOrders]);
 
   const stop = () => { abortRef.current = true; };
 
   // Filtering + sorting
   const filtered = results.filter(r => {
-    if (!filterText) return true;
-    return (r.item?.market_hash_name || "").toLowerCase().includes(filterText.toLowerCase());
+    if (filterText && !(r.item?.market_hash_name || "").toLowerCase().includes(filterText.toLowerCase())) return false;
+    // Liquidity filter: skip items with known low SCM volume (null = unknown, let it through)
+    const vol = r.item?.scm?.volume;
+    const minVol = parseInt(minVolume) || 0;
+    if (minVol > 0 && vol != null && vol < minVol) return false;
+    return true;
   });
 
   const sorted = [...filtered].sort((a, b) => {
@@ -201,7 +225,38 @@ export default function App() {
       </header>
 
       {/* ── FILTERS ── */}
-      <div style={{ borderBottom: "1px solid #1a1a1f", padding: "10px 20px", display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
+      <div style={{ borderBottom: "1px solid #1a1a1f", padding: "10px 20px", display: "flex", flexDirection: "column", gap: 8 }}>
+        {/* Row 1: Category + Liquidity */}
+        <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 9, color: "#52525b", textTransform: "uppercase", letterSpacing: ".08em" }}>Type</span>
+          {[
+            { v: 0, l: "All" },
+            { v: 1, l: "Normal" },
+            { v: 2, l: "StatTrak™" },
+            { v: 3, l: "Souvenir" },
+          ].map(c => (
+            <button key={c.v} className={`chip ${category === c.v ? "on" : ""}`} onClick={() => setCategory(c.v)}>{c.l}</button>
+          ))}
+
+          <div style={{ width: 1, height: 20, background: "#27272a", margin: "0 4px" }} />
+
+          <span style={{ fontSize: 9, color: "#52525b", textTransform: "uppercase", letterSpacing: ".08em" }}>Liquidity</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <span style={{ fontSize: 10, color: "#71717a" }}>Min SCM vol:</span>
+            <input className="inp" type="number" value={minVolume} onChange={e => setMinVolume(e.target.value)} style={{ width: 56 }} />
+          </div>
+          {[
+            { v: "0", l: "All" },
+            { v: "5", l: "5+" },
+            { v: "20", l: "20+" },
+            { v: "50", l: "50+" },
+          ].map(q => (
+            <button key={q.v} className={`chip ${minVolume === q.v ? "on" : ""}`} onClick={() => setMinVolume(q.v)}>{q.l}</button>
+          ))}
+        </div>
+
+        {/* Row 2: Search + Sort */}
+        <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
         <input className="inp" placeholder='Skin name (e.g. AK-47 | Redline (Field-Tested))' value={searchName}
           onChange={e => setSearchName(e.target.value)} onKeyDown={e => e.key === "Enter" && scan()} style={{ width: 340 }} />
         <input className="inp" placeholder="Min $" type="number" value={minPrice} onChange={e => setMinPrice(e.target.value)} style={{ width: 72 }} />
@@ -221,6 +276,7 @@ export default function App() {
 
         <div style={{ marginLeft: "auto" }}>
           <input className="inp" placeholder="Filter results..." value={filterText} onChange={e => setFilterText(e.target.value)} style={{ width: 170 }} />
+        </div>
         </div>
       </div>
 
@@ -262,7 +318,7 @@ export default function App() {
 
       {/* ── TABLE HEAD ── */}
       <div style={{
-        display: "grid", gridTemplateColumns: "2.2fr 1fr 1fr 1fr 1fr .7fr",
+        display: "grid", gridTemplateColumns: "2.2fr 1fr 1fr .9fr .9fr .6fr .5fr",
         gap: 8, padding: "7px 20px", fontSize: 9, color: "#52525b", textTransform: "uppercase",
         letterSpacing: ".1em", borderBottom: "1px solid #1a1a1f", position: "sticky", top: 0, background: "#0b0b10", zIndex: 10
       }}>
@@ -271,6 +327,7 @@ export default function App() {
         <div style={{ textAlign: "right" }}>Top Buy Order (Bid)</div>
         <div style={{ textAlign: "right" }}>Spread</div>
         <div style={{ textAlign: "right" }}>Spread %</div>
+        <div style={{ textAlign: "right" }}>Vol</div>
         <div style={{ textAlign: "right" }}>Float</div>
       </div>
 
@@ -285,7 +342,7 @@ export default function App() {
 
         return (
           <div key={l.id || i} className="row" style={{
-            display: "grid", gridTemplateColumns: "2.2fr 1fr 1fr 1fr 1fr .7fr",
+            display: "grid", gridTemplateColumns: "2.2fr 1fr 1fr .9fr .9fr .6fr .5fr",
             gap: 8, padding: "8px 20px", borderBottom: "1px solid #111116", alignItems: "center",
             animationDelay: `${(i%50)*.015}s`
           }} onClick={() => window.open(`https://csfloat.com/item/${l.id}`,"_blank")}>
@@ -327,6 +384,15 @@ export default function App() {
                 <div style={{ height: "100%", width: `${Math.min(spreadPct, 50)*2}%`, background: sc, borderRadius: 2 }} />
               </div>
               <span className="pill" style={{ background: sc+"18", color: sc }}>{spreadPct.toFixed(1)}%</span>
+            </div>
+
+            {/* Volume */}
+            <div style={{ textAlign: "right" }}>
+              {it.scm?.volume != null ? (
+                <div style={{ fontSize: 11, fontWeight: 600, color: it.scm.volume >= 50 ? "#22c55e" : it.scm.volume >= 10 ? "#eab308" : "#ef4444" }}>
+                  {it.scm.volume}
+                </div>
+              ) : <span style={{ color: "#3f3f46" }}>—</span>}
             </div>
 
             {/* Float */}
